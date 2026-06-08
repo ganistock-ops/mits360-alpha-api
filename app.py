@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -43,6 +44,36 @@ def calc_rs(hist, period=90):
     rs = min(max(int(50 + change), 0), 100)
     return rs
 
+def fetch_stock(sym):
+    try:
+        ticker = yf.Ticker(sym + '.NS')
+        hist = ticker.history(period='6mo')
+        if hist.empty:
+            return {'symbol': sym, 'error': 'No data found', 'signal': 'avoid'}
+        close = float(hist['Close'].iloc[-1])
+        prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else close
+        chg_pct = round(((close - prev_close) / prev_close) * 100, 2)
+        ema200_series = hist['Close'].ewm(span=200, adjust=False).mean()
+        ema200 = float(ema200_series.iloc[-1])
+        above_ema = close > ema200
+        rs = calc_rs(hist)
+        phase = get_smc_phase(hist)
+        signal = get_signal(rs, above_ema, phase)
+        volume = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
+        return {
+            'symbol': sym,
+            'price': round(close, 2),
+            'chgPct': chg_pct,
+            'rs': rs,
+            'aboveEMA': above_ema,
+            'ema200': round(ema200, 2),
+            'phase': phase,
+            'signal': signal,
+            'volume': volume
+        }
+    except Exception as e:
+        return {'symbol': sym, 'error': str(e), 'signal': 'avoid'}
+
 @app.route('/')
 def home():
     return jsonify({'status': 'MITS 360 Alpha Harvester API Live!'})
@@ -56,46 +87,12 @@ def scan():
     symbols = [s.strip().upper() for s in symbols_raw.split(',') if s.strip()]
     results = []
 
-    for sym in symbols:
-        try:
-            ticker = yf.Ticker(sym + '.NS')
-            hist = ticker.history(period='6mo')
-            info = ticker.fast_info
-
-            if hist.empty:
-                continue
-
-            close = float(hist['Close'].iloc[-1])
-            prev_close = float(hist['Close'].iloc[-2]) if len(hist) > 1 else close
-            chg_pct = round(((close - prev_close) / prev_close) * 100, 2)
-
-            ema200_series = hist['Close'].ewm(span=200, adjust=False).mean()
-            ema200 = float(ema200_series.iloc[-1])
-            above_ema = close > ema200
-
-            rs = calc_rs(hist)
-            phase = get_smc_phase(hist)
-            signal = get_signal(rs, above_ema, phase)
-
-            volume = int(hist['Volume'].iloc[-1]) if 'Volume' in hist else 0
-
-            results.append({
-                'symbol': sym,
-                'price': round(close, 2),
-                'chgPct': chg_pct,
-                'rs': rs,
-                'aboveEMA': above_ema,
-                'ema200': round(ema200, 2),
-                'phase': phase,
-                'signal': signal,
-                'volume': volume
-            })
-        except Exception as e:
-            results.append({
-                'symbol': sym,
-                'error': str(e),
-                'signal': 'avoid'
-            })
+    for i, sym in enumerate(symbols):
+        result = fetch_stock(sym)
+        results.append(result)
+        # Delay between requests to avoid Yahoo Finance rate limiting
+        if i < len(symbols) - 1:
+            time.sleep(1.5)
 
     return jsonify({'results': results, 'count': len(results)})
 
